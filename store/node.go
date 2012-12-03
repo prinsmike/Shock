@@ -33,6 +33,7 @@ type Node struct {
 	Acl          acl               `bson:"acl" json:"-"`
 	VersionParts map[string]string `bson:"version_parts" json:"-"`
 	Type         string            `bson:"type" json:"-"`
+	Relatives    []relationship    `bson:"relatives" json:"relatives"`
 }
 
 type file struct {
@@ -51,6 +52,12 @@ type partsList struct {
 	Parts  []partsFile `json:"parts"`
 }
 
+type relationship struct {
+	Type      string   `bson: "relation" json:"relation"`
+	Ids       []string `bson:"ids" json:"ids"`
+	Operation string   `bson:"operation" json:"operation"`
+}
+
 type partsFile []string
 
 type FormFiles map[string]FormFile
@@ -59,6 +66,11 @@ type FormFile struct {
 	Name     string
 	Path     string
 	Checksum map[string]string
+}
+
+type AttrHis struct {
+	Rev  string
+	Attr interface{}
 }
 
 // HasFoo functions
@@ -77,6 +89,15 @@ func (node *Node) HasIndex(index string) bool {
 			if _, err := os.Stat(node.IndexPath() + "/" + index); err == nil {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func (node *Node) HasParent() bool {
+	for _, relative := range node.Relatives {
+		if relative.Type == "parent" {
+			return true
 		}
 	}
 	return false
@@ -396,15 +417,11 @@ func (node *Node) Update(params map[string]string, files FormFiles) (err error) 
 
 	// set attributes from file
 	if _, hasAttr := files["attributes"]; hasAttr {
-		if node.Attributes == nil {
-			if err = node.SetAttributes(files["attributes"]); err != nil {
-				return err
-			}
-			os.Remove(files["attributes"].Path)
-			delete(files, "attributes")
-		} else {
-			return errors.New(e.AttrImut)
+		if err = node.SetAttributes(files["attributes"]); err != nil {
+			return err
 		}
+		os.Remove(files["attributes"].Path)
+		delete(files, "attributes")
 	}
 
 	// handle part file
@@ -422,6 +439,48 @@ func (node *Node) Update(params map[string]string, files FormFiles) (err error) 
 			}
 		}
 	}
+
+	// update relatives
+	if _, hasRelation := params["relation"]; hasRelation {
+		rtype := params["relation"]
+
+		if rtype == "parent" {
+			if node.HasParent() {
+				return errors.New(e.ProvenanceImut)
+			}
+		}
+		var ids string
+		if _, hasIds := params["ids"]; hasIds {
+			ids = params["ids"]
+		} else {
+			return errors.New("missing ids for updating relativs")
+		}
+		var operation string
+		if _, hasOp := params["operation"]; hasOp {
+			operation = params["operation"]
+		}
+		if err = node.UpdateRelatives(rtype, ids, operation); err != nil {
+			return err
+		}
+	}
+
+	//update node type
+	if _, hasDataType := params["datatype"]; hasDataType {
+		if err = node.UpdateDataType(params["datatype"]); err != nil {
+			return err
+		}
+	}
+
+	//update file format
+	if _, hasFormat := params["format"]; hasFormat {
+		if node.File.Format != "" {
+			return errors.New(fmt.Sprintf("file format already set:%s", node.File.Format))
+		}
+		if err = node.SetFileFormat(params["format"]); err != nil {
+			return err
+		}
+	}
+
 	return
 }
 
@@ -431,8 +490,11 @@ func (node *Node) Save() (err error) {
 		return
 	}
 	defer db.Close()
-
 	node.UpdateVersion()
+	if len(node.Revisions) == 0 || node.Revisions[len(node.Revisions)-1].Version != node.Version {
+		n := Node{node.Id, node.Version, node.File, node.Attributes, node.Indexes, node.Acl, node.VersionParts, node.Type, nil}
+		node.Revisions = append(node.Revisions, n)
+	}
 	bsonPath := fmt.Sprintf("%s/%s.bson", node.Path(), node.Id)
 	os.Remove(bsonPath)
 	nbson, err := bson.Marshal(node)
@@ -501,6 +563,37 @@ func (node *Node) SetFile(file FormFile) (err error) {
 	return
 }
 
+func (node *Node) UpdateRelatives(rtype string, ids string, operation string) (err error) {
+	var relative relationship
+	relative.Type = rtype
+	idList := strings.Split(ids, ",")
+	for _, id := range idList {
+		relative.Ids = append(relative.Ids, id)
+	}
+	relative.Operation = operation
+	node.Relatives = append(node.Relatives, relative)
+	err = node.Save()
+	return
+}
+
+func (node *Node) UpdateDataType(types string) (err error) {
+	typelist := strings.Split(types, ",")
+	for _, newtype := range typelist {
+		if contains(node.Type, newtype) {
+			continue
+		}
+		node.Type = append(node.Type, newtype)
+	}
+	err = node.Save()
+	return
+}
+
+func (node *Node) SetFileFormat(format string) (err error) {
+	node.File.Format = format
+	err = node.Save()
+	return
+}
+
 func (node *Node) SetAttributes(attr FormFile) (err error) {
 	attributes, err := ioutil.ReadFile(attr.Path)
 	if err != nil {
@@ -510,6 +603,13 @@ func (node *Node) SetAttributes(attr FormFile) (err error) {
 	if err != nil {
 		return
 	}
+
+	h := md5.New()
+	h.Write(attributes)
+
+	rev := AttrHis{}
+	rev.Rev = fmt.Sprintf("%x", h.Sum(nil))
+	rev.Attr = node.Attributes
 	err = node.Save()
 	return
 }
@@ -519,4 +619,13 @@ func (node *Node) ToJson() (s string, err error) {
 	m, err := json.Marshal(node)
 	s = string(m)
 	return
+}
+
+func contains(list []string, elem string) bool {
+	for _, t := range list {
+		if t == elem {
+			return true
+		}
+	}
+	return false
 }
