@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type NodeController struct{}
@@ -311,13 +312,20 @@ func (cr *NodeController) ReadMany(cx *goweb.Context) {
 
 	// Gather params to make db query. Do not include the
 	// following list.	
-	skip := map[string]int{"limit": 1, "skip": 1, "query": 1}
+	skip := map[string]int{"limit": 1, "skip": 1, "query": 1, "querytypes": 1}
 	if query.Has("query") {
 		for key, val := range query.All() {
 			_, s := skip[key]
 			if !s {
 				q[fmt.Sprintf("attributes.%s", key)] = val[0]
 			}
+		}
+	}
+
+	if query.Has("querytypes") {
+		if query.Value("querytypes") != "" {
+			querytypes := strings.Split(query.Value("querytypes"), ",")
+			q["type"] = bson.M{"$all": querytypes}
 		}
 	}
 
@@ -397,7 +405,6 @@ func (cr *NodeController) Update(id string, cx *goweb.Context) {
 		}
 
 		if query.Value("index") == "bai" {
-
 			//bam index is created by the command-line tool samtools
 			if ext := node.FileExt(); ext == ".bam" {
 				if err := CreateBamIndex(node.FilePath()); err != nil {
